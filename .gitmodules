@@ -1,0 +1,6 @@
+[submodule "ExternalProjects/threadutils"]
+	path = ExternalProjects/threadutils
+	url = https://github.com/bburrough/threadutils
+[submodule "ExternalProjects/safelist"]
+	path = ExternalProjects/safelist
+	url = https://github.com/bburrough/safelist
