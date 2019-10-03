@@ -9,7 +9,7 @@ CXX=g++
 #CXX=i686-pc-cygwin-gcc
 
 BINDIR=./bin
-CFLAGS=-g
+CFLAGS=-g -IExternalProjects/safelist -IExternalProjects/threadutils
 
 SERVERSOURCEFILENAMES=servermain.cpp fdutils.cpp socketconnection_base.cpp tlssocketconnection.cpp serversocket.cpp packet.cpp debugger.cpp
 SERVEROBJECTS=$(SERVERSOURCEFILENAMES:.cpp=.o)
