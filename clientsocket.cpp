@@ -117,7 +117,7 @@ bool ClientSocket::Connect(const string& ip_address, int port)
     DeleteResolvedAddress(addr);
     if (error_ret == -1)
     {
-        LOG_ERROR_OUT("Connect failed.  errno: " << errno << " - " << strerror(errno));
+        LOG_ERROR_OUT("Connect failed.  errno: " << errno);
         return false;
     }
 

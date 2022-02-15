@@ -13,10 +13,13 @@ bool operator==(const timeval& x, const timeval& y);
 
 int WaitUntilReadable(int file_descriptor);
 int WaitUntilWritable(int file_descriptor);
+int WaitUntilReadableOrWritable(int file_descriptor);
 int WaitUntilWritableWithTimeval(int file_descriptor, timeval* t);
 int WaitUntilReadableWithTimeval(int file_descriptor, timeval* t);
+int WaitUntilReadableOrWritableWithTimeval(int file_descriptor, timeval* t);
 int WaitUntilReadableOrTimeout(int file_descriptor, uint32_t milliseconds);
 int WaitUntilWritableOrTimeout(int file_descriptor, uint32_t milliseconds);
+int WaitUntilReadableOrWritableOrTimeout(int file_descriptor, uint32_t milliseconds);
 void CloseDescriptor(int file_descriptor);
 bool SetNonBlockingMode(int file_descriptor);
 

@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <string>
 
 class SocketConnection_Base;
 
@@ -64,6 +65,7 @@ public:
     PacketDataLength GetDataLength() const;
 
     void DebugString() const;
+    std::string ToString() const;
 
 private:
     /*

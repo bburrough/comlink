@@ -36,6 +36,9 @@ public:
 
     virtual void Deactivate();
 
+    virtual void PrepareServerConnection() {}
+    virtual void PrepareClientConnection() {}
+
     void IncrementPacketsOut();
 
     bool DecrementPacketsOut();

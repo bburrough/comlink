@@ -40,7 +40,8 @@ public:
 
     void DeletePacket(Packet* pkt);
 
-    //bool WriteAllExceptOrigin(const Packet* pkt);
+    bool WriteAll(const Packet* pkt);
+    bool WriteAllExceptOrigin(const Packet* pkt);
 
     void Run() const;
 

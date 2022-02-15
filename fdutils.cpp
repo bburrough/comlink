@@ -49,6 +49,21 @@ int WaitUntilWritable(int file_descriptor)
 }
 
 
+int WaitUntilReadableOrWritableWithTimeval(int file_descriptor, timeval* t)
+{
+    fd_set sc_fd_set;
+    FD_ZERO(&sc_fd_set);
+    FD_SET(file_descriptor, &sc_fd_set);
+
+    return select(FD_SETSIZE, &sc_fd_set, &sc_fd_set, NULL, t);
+}
+
+
+int WaitUntilReadableOrWritable(int file_descriptor)
+{
+    return WaitUntilReadableOrWritableWithTimeval(file_descriptor, NULL);
+}
+
 
 void _timevalMilliseconds(timeval* ts, uint32_t milliseconds)
 {
@@ -70,6 +85,14 @@ int WaitUntilReadableOrTimeout(int file_descriptor, uint32_t milliseconds)
     timeval t;
     _timevalMilliseconds(&t, milliseconds);
     return WaitUntilReadableWithTimeval(file_descriptor, &t);
+}
+
+
+int WaitUntilReadableOrWritableOrTimeout(int file_descriptor, uint32_t milliseconds)
+{
+    timeval t;
+    _timevalMilliseconds(&t, milliseconds);
+    return WaitUntilReadableOrWritableWithTimeval(file_descriptor, &t);
 }
 
 

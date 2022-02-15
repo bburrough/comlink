@@ -73,7 +73,7 @@ void TLSSocketConnection::StaticDeinit()
 
 
 TLSSocketConnection::TLSSocketConnection(SocketConnectionOwner* owner, PCQueue<Packet*>* input_buffer_ptr)
-    : SocketConnection_Base(owner, input_buffer_ptr), active(false), _sslHandle(NULL), _client_vs_server_protect(false), _sslContext(NULL)
+    : SocketConnection_Base(owner, input_buffer_ptr), active(false), _sslHandle(NULL), _client_vs_server_protect(false), _sslContext(NULL), ssl_handle_mutex(PTHREAD_MUTEX_INITIALIZER)
 {
     DEBUG_REPORT_LOCATION;
 
@@ -85,11 +85,13 @@ TLSSocketConnection::~TLSSocketConnection()
 {
     DEBUG_REPORT_LOCATION;
 
+    pthread_mutex_lock(&ssl_handle_mutex);
     if (_sslHandle)
     {
         SSL_free(_sslHandle);
         _sslHandle = NULL;
     }
+    pthread_mutex_unlock(&ssl_handle_mutex);
 
     if (_sslContext)
     {
@@ -135,8 +137,10 @@ void TLSSocketConnection::Activate()
     DEBUG_REPORT_LOCATION;
     if(!GetActive())
     {
-        //start the reader/writer thread.
-        pthread_create(&reader_writer_id, NULL, TLSSocketConnection::ReaderWriter, this);
+        //start the reader/writer threads.
+        //pthread_create(&reader_writer_id, NULL, TLSSocketConnection::ReaderWriter, this);
+        pthread_create(&reader_id, NULL, TLSSocketConnection::Reader, this);
+        pthread_create(&writer_id, NULL, TLSSocketConnection::Writer, this);
         active = true;
     }
     Unlock();
@@ -165,17 +169,31 @@ void TLSSocketConnection::Deactivate()
             break;
 
         //close threads
-        if(!pthread_equal(pthread_self(), reader_writer_id))
+        if (!pthread_equal(pthread_self(), reader_id))
         {
-            LOG_DEBUG_OUT("cancelling ReaderWriter thread.");
-            rv = pthread_cancel(reader_writer_id);
-            pthread_join(reader_writer_id, NULL);
-            LOG_DEBUG_OUT("cancelled ReaderWriter thread.");
+            LOG_DEBUG_OUT("cancelling Reader thread.");
+            rv = pthread_cancel(reader_id);
+            pthread_join(reader_id, NULL);
+            LOG_DEBUG_OUT("cancelled Reader thread.");
         }
         else
         {
-            LOG_DEBUG_OUT("ReaderWriter thread refused to cancel itself.");
-            pthread_detach(reader_writer_id);
+            LOG_DEBUG_OUT("Reader thread refused to cancel itself.");
+            pthread_detach(reader_id);
+        }
+
+
+        if (!pthread_equal(pthread_self(), writer_id))
+        {
+            LOG_DEBUG_OUT("cancelling Writer thread.");
+            rv = pthread_cancel(writer_id);
+            pthread_join(writer_id, NULL);
+            LOG_DEBUG_OUT("cancelled Writer thread.");
+        }
+        else
+        {
+            LOG_DEBUG_OUT("Writer thread refused to cancel itself.");
+            pthread_detach(writer_id);
         }
 
         /*if (SSL_op_timeout(SSL_shutdown, _sslHandle, GetDescriptor(), 10) <= 0)
@@ -231,7 +249,7 @@ SSL* TLSSocketConnection::GetSSLHandle() const
     return _sslHandle;
 }
 
-
+#if 0
 /*
     OpenSSL is a beast, ain't it?  I can't believe the human race has
     deferred the securing of its data to this monstrosity.  Our implementation
@@ -523,8 +541,32 @@ void* TLSSocketConnection::ReaderWriter(void* void_arg)
         {
 #if !(defined(WIN32) || defined(__WIN32) || defined(__WIN32__) || defined(FORCE_WIN32))
             usleep(25000);
-#else
+#elif 1
             Sleep(25);
+#else
+            WaitUntilReadableOrWritable(sc_arg->GetDescriptor()); /* This is wrong. Regarding writes, the question isn't whether
+                                                                     the underlying socket is writable. It's whether there's data
+                                                                     in the output_buffer that's available to be written. 
+                                                                     
+                                                                     What we really want is wait until data arrives for reading
+                                                                     in the socket, or until data arrives in the output_buffer
+                                                                     for writing. 
+                                                                     
+                                                                     In consideration of converting this all to blocking IO, the 
+                                                                     write side is ready for that. We can change TryConsumer() to
+                                                                     Consumer() and it will be blocking.  For the read side, we
+                                                                     have to not set the FD to non-blocking.
+                                                                     
+                                                                     Actually, I am not at all confident that it's okay to call
+                                                                     SSL_write and SSL_read on the same SSL context from multiple
+                                                                     threads. So, conversion to blocking isn't the only consideration.
+
+
+                                                                     ----
+
+                                                                     WaitUntil( readable || (temp == null && output_buffer->TryConsumer() || temp != null && writable );
+                                                                     
+                                                                     */
 #endif
         }
 
@@ -538,6 +580,415 @@ void* TLSSocketConnection::ReaderWriter(void* void_arg)
     pthread_exit((void*)1);
     return NULL;
 }
+#endif
+
+
+void* TLSSocketConnection::Reader(void* void_arg)
+{
+    if (sizeof(PacketDataLength) != sizeof(uint32_t)) // TODO: Change to compile-time assert / static assert.
+        throw("major problem.  PacketDataLength does not equal sizeof(uint32_t), which breaks ntohl");
+
+    //enum
+    //{
+    //    READ,
+    //    WRITE
+    //};
+
+    enum
+    {
+        READ_MODE_HEADER,
+        READ_MODE_PAYLOAD
+    };
+
+    const unsigned int cbuf_size = sizeof(PacketType) + sizeof(PacketDataLength); //size of the type and length fields of a packet (i.e. this is used to store the header of the incoming packet)
+    char buf[cbuf_size] = { 0 };
+    TLSSocketConnection* sc_arg = (TLSSocketConnection*)void_arg;
+    pthread_mutex_lock(&(sc_arg->ssl_handle_mutex));
+    SSL* ssl = sc_arg->GetSSLHandle();
+    pthread_mutex_unlock(&(sc_arg->ssl_handle_mutex));
+    ssize_t read_length = 0;
+    int read_accum_count = 0;
+    uint8_t read_mode = READ_MODE_HEADER;
+    bool stay_alive = true;
+    string* temp = NULL;
+    char* packetDataBuffer = NULL;
+    char* seek_position = NULL;
+    bool read_starved = false;
+
+    DEBUG_REPORT_LOCATION;
+
+    /*
+        PTHREAD_CANCEL_DEFERRED will ensure that the threads
+        are killed only when they're blocked.  This is much
+        safer than just killing the threads at random.
+    */
+    pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
+
+    while (stay_alive)
+    {
+        int err;
+        if (read_mode == READ_MODE_HEADER)
+        {
+            read_starved = false;
+            pthread_mutex_lock(&(sc_arg->ssl_handle_mutex));
+            int n = SSL_read(ssl, buf + read_accum_count, cbuf_size - read_accum_count);
+            if (n < 0)
+            {
+                err = SSL_get_error(ssl, n);
+                pthread_mutex_unlock(&(sc_arg->ssl_handle_mutex));
+
+                if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+                {
+                    read_starved = true;
+                }
+                else
+                {
+                    LOG_ERROR_OUT("Error: " << ERR_error_string(err, NULL));
+                    stay_alive = false;
+                    break;
+                }
+            }
+            else if (n == 0)
+            {
+                pthread_mutex_unlock(&(sc_arg->ssl_handle_mutex));
+
+                // disconnected
+                LOG_DEBUG_OUT("Disconnected.");
+                stay_alive = false;
+                break;
+            }
+            else
+            {
+                pthread_mutex_unlock(&(sc_arg->ssl_handle_mutex));
+
+                read_accum_count += n;
+                if (read_accum_count >= cbuf_size)
+                {
+                    read_mode = READ_MODE_PAYLOAD;
+                }
+            }
+
+        }
+        if (read_mode == READ_MODE_PAYLOAD)
+        {
+            PacketType type = buf[0]; // TODO: validate the packet type  // the type is the first byte of the header
+            PacketDataLength data_length = 0;
+#if 1
+            char* bytePtr = (char*)&data_length;
+            for (int i = 0; i < sizeof(PacketDataLength); i++)
+                bytePtr[i] = buf[i + 1];                                // the length is bytes 2, 3, 4, and 5.
+            data_length = ntohl(data_length);
+#else
+            memcpy(&data_length, buf + 1, sizeof(PacketDataLength));
+#endif
+            if (data_length > 0)
+            {
+                if (packetDataBuffer == NULL) // if we're reading brand new data
+                {
+                    packetDataBuffer = new char[data_length]; // then allocate a new buffer
+                    seek_position = packetDataBuffer;
+                }
+                if (packetDataBuffer == NULL) // if allocation failed
+                {
+                    // colossal error
+                    LOG_ERROR_OUT("Failed to allocated packetDataBuffer.");
+                    stay_alive = false;
+                    break;
+                }
+                read_starved = false;
+                pthread_mutex_lock(&(sc_arg->ssl_handle_mutex));
+
+                ssize_t data_read_length = 0;
+                data_read_length = SSL_read(ssl, seek_position, data_length - (seek_position - packetDataBuffer));
+                if (data_read_length < 0)
+                {
+                    err = SSL_get_error(ssl, data_read_length);
+                    pthread_mutex_unlock(&(sc_arg->ssl_handle_mutex));
+                    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+                    {
+                        read_starved = true;
+                    }
+                    else
+                    {
+                        LOG_ERROR_OUT("Error: " << ERR_error_string(err, NULL));
+                        delete[] packetDataBuffer;
+                        packetDataBuffer = NULL;
+                        seek_position = NULL;
+                        stay_alive = false;
+                        break;
+                    }
+                }
+                else if (data_read_length == 0)
+                {
+                    pthread_mutex_unlock(&(sc_arg->ssl_handle_mutex));
+
+                    // disconnected
+                    LOG_DEBUG_OUT("Disconnected.");
+                    delete[] packetDataBuffer;
+                    packetDataBuffer = NULL;
+                    seek_position = NULL;
+                    stay_alive = false;
+                    break;
+                }
+                else
+                {
+                    pthread_mutex_unlock(&(sc_arg->ssl_handle_mutex));
+
+                    seek_position += data_read_length;
+                }
+
+            }
+
+            if (data_length == 0 || (size_t)(seek_position - packetDataBuffer) >= data_length)
+            {
+                if (type == Packet::ERR_DISCONNECTED)
+                {
+                    // disconnected
+                    LOG_DEBUG_OUT("Disconnected.");
+                    delete[] packetDataBuffer;
+                    packetDataBuffer = NULL;
+                    seek_position = NULL;
+                    stay_alive = false;
+                    break;
+                }
+
+                try
+                {
+                    Packet* new_pkt = NewPacket((SocketConnection_Base*)sc_arg, type, (PacketDataLength)(seek_position - packetDataBuffer), packetDataBuffer, false);
+                    if (new_pkt == NULL)
+                    {
+                        /*
+                            The below deallocation is not necessary because if NewPacket fails, then ~Packet will be called which deallocs
+                            packetDataBuffer.  See C++ spec 15.2.1.
+                        */
+                        //if (packetDataBuffer)
+                        //    delete[] packetDataBuffer;
+                        LOG_ERROR_OUT("Failed to instantiate an incoming packet (section 1). ");
+                    }
+                    else
+                    {
+                        sc_arg->input_buffer->Producer(new_pkt); // if so, create a packet and stick it in the input_buffer
+                    }
+                }
+                CATCHALL
+                {
+                    LOG_ERROR_OUT("Failed to instantiate an incoming packet (section 2).");
+                }
+                    // packetDataBuffer is now owned by the newly created packet, so don't delete it.
+                packetDataBuffer = NULL;
+                seek_position = NULL;
+                read_accum_count = 0;
+                read_mode = READ_MODE_HEADER;
+            }
+        } // READ_MODE_PAYLOAD
+
+
+        if (!stay_alive)
+            break;
+
+        //pthread_testcancel(); // TODO: Wait. Won't this leak memory if we were in the middle of reading a packet above?
+                            // Yes, it will.  See pthread_cleanup_push().
+
+        if (read_starved)
+        {
+            if (err == SSL_ERROR_WANT_READ)
+            {
+                int status = 0;
+                do
+                {
+                    pthread_testcancel();
+                    status = WaitUntilReadableOrTimeout(sc_arg->GetDescriptor(),250);
+                    if (status < 0)
+                    {
+                        LOG_ERROR_OUT("Unexpected starvation condition.");
+                        stay_alive = false;
+                        break;
+                    }
+                } while (status == 0);
+            }
+            else if (err == SSL_ERROR_WANT_WRITE)
+            {
+                int status = 0;
+                do
+                {
+                    pthread_testcancel();
+                    status = WaitUntilWritableOrTimeout(sc_arg->GetDescriptor(), 250);
+                    if (status < 0)
+                    {
+                        LOG_ERROR_OUT("Unexpected starvation condition.");
+                        stay_alive = false;
+                        break;
+                    }
+                } while (status == 0);
+            }
+            else
+            {
+                // This should never happen because the code above is should only be setting read_starved when SSL_ERROR_WANT_READ or SSL_ERROR_WANT_WRITE happen.
+                LOG_ERROR_OUT("Unexpected starvation condition.");
+                stay_alive = false;
+                break;
+            }
+        }
+
+        pthread_testcancel();
+    } // end of while
+
+    SocketConnectionOwner* owner = sc_arg->GetOwner();
+    if (owner)
+        owner->DeleteSocketConnection((SocketConnection_Base*)sc_arg);
+    else
+        sc_arg->Deactivate(); // TODO: This is a hack.  Client sockets need to clean up properly.
+    pthread_exit((void*)1);
+    return NULL;
+}
+
+
+void* TLSSocketConnection::Writer(void* void_arg)
+{
+    if (sizeof(PacketDataLength) != sizeof(uint32_t))
+        throw("major problem.  PacketDataLength does not equal sizeof(uint32_t), which breaks ntohl");
+
+
+    TLSSocketConnection* sc_arg = (TLSSocketConnection*)void_arg;
+    pthread_mutex_lock(&(sc_arg->ssl_handle_mutex));
+    SSL* ssl = sc_arg->GetSSLHandle();
+    pthread_mutex_unlock(&(sc_arg->ssl_handle_mutex));
+    int write_accum_count = 0;
+    bool stay_alive = true;
+    string* temp = NULL;
+    bool write_starved = false;
+
+    DEBUG_REPORT_LOCATION;
+
+    /*
+        PTHREAD_CANCEL_DEFERRED will ensure that the threads
+        are killed only when they're blocked.  This is much
+        safer than just killing the threads at random.
+    */
+    pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
+
+    while (stay_alive)
+    {
+        // WRITE
+        int err;
+        write_starved = false;
+        if (temp == NULL)
+            temp = sc_arg->output_buffer.Consumer();
+
+        if (temp == NULL)
+        {
+            write_starved = true;
+        }
+        else
+        {
+            pthread_mutex_lock(&(sc_arg->ssl_handle_mutex));
+            int n = SSL_write(ssl, temp->c_str() + write_accum_count, temp->size() - write_accum_count);
+            if (n < 0)
+            {
+                err = SSL_get_error(ssl, n);
+                pthread_mutex_unlock(&(sc_arg->ssl_handle_mutex));
+
+                if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+                {
+                    write_starved = true;
+                }
+                else
+                {
+                    LOG_ERROR_OUT("Error: " << ERR_error_string(err, NULL));
+                    stay_alive = false;
+                    break;
+                }
+            }
+            else if (n == 0)
+            {
+                pthread_mutex_unlock(&(sc_arg->ssl_handle_mutex));
+
+                // disconnected
+                LOG_DEBUG_OUT("Disconnected.");
+                stay_alive = false;
+                break;
+            }
+            else
+            {
+                pthread_mutex_unlock(&(sc_arg->ssl_handle_mutex));
+
+                write_accum_count += n;
+                if (write_accum_count >= temp->size())
+                {
+                    delete temp;
+                    temp = NULL;
+                    write_accum_count = 0;
+                }
+                /*
+                else
+                {
+                    // Continue writing because we're not done yet.  But, do it in a way that allows SSL_read to execute also.
+                }
+                */
+            }
+        }
+
+
+        if (!stay_alive)
+            break;
+
+        //pthread_testcancel(); // TODO: Wait. Won't this leak memory if we were in the middle of reading a packet above?
+                                    // Yes, it will.  See pthread_cleanup_push().
+
+        if (write_starved)
+        {
+            if (err == SSL_ERROR_WANT_READ)
+            {
+                int status = 0;
+                do
+                {
+                    pthread_testcancel();
+                    status = WaitUntilReadableOrTimeout(sc_arg->GetDescriptor(), 250);
+                    if (status < 0)
+                    {
+                        LOG_ERROR_OUT("Unexpected starvation condition.");
+                        stay_alive = false;
+                        break;
+                    }
+                } while (status == 0);
+            }
+            else if (err == SSL_ERROR_WANT_WRITE)
+            {
+                int status = 0;
+                do
+                {
+                    pthread_testcancel();
+                    status = WaitUntilWritableOrTimeout(sc_arg->GetDescriptor(), 250);
+                    if (status < 0)
+                    {
+                        LOG_ERROR_OUT("Unexpected starvation condition.");
+                        stay_alive = false;
+                        break;
+                    }
+                } while (status == 0);
+            }
+            else
+            {
+                // This should never happen because the code above is should only be setting read_starved when SSL_ERROR_WANT_READ or SSL_ERROR_WANT_WRITE happen.
+                LOG_ERROR_OUT("Unexpected starvation condition.");
+                stay_alive = false;
+                break;
+            }
+        }
+
+        pthread_testcancel();
+
+    } // end of while
+
+    SocketConnectionOwner* owner = sc_arg->GetOwner();
+    if (owner)
+        owner->DeleteSocketConnection((SocketConnection_Base*)sc_arg);
+    else
+        sc_arg->Deactivate(); // TODO: This is a hack.  Client sockets need to clean up properly.
+    pthread_exit((void*)1);
+    return NULL;
+}
+
 
 
 int SSL_op_timeout(SSL_func func, SSL* _sslHandle, int file_descriptor, int timeout_seconds)
@@ -707,16 +1158,25 @@ void TLSSocketConnection::SetSSLHandle(SSL* ssl)
 
 bool TLSSocketConnection::SSLConnect()
 {
+    pthread_mutex_lock(&ssl_handle_mutex);
+
     if (_sslHandle)
+    {
+        pthread_mutex_unlock(&ssl_handle_mutex);
         return false;
+    }
     if (!_sslContext)
+    {
+        pthread_mutex_unlock(&ssl_handle_mutex);
         return false;
+    }
 
     _sslHandle = NULL;
 
     int fd = GetDescriptor();
     if (fd <= 0)
     {
+        pthread_mutex_unlock(&ssl_handle_mutex);
         throw("descriptor isn't set");
     }
     else
@@ -727,6 +1187,7 @@ bool TLSSocketConnection::SSLConnect()
         _sslHandle = SSL_new(_sslContext);
         if (_sslHandle == NULL)
         {
+            pthread_mutex_unlock(&ssl_handle_mutex);
             LOG_ERROR_OUT("SSL_new() failed.");
             return false;
         }
@@ -737,6 +1198,7 @@ bool TLSSocketConnection::SSLConnect()
             LOG_ERROR_OUT("SSL_set_fd() failed.");
             SSL_free(_sslHandle);
             _sslHandle = NULL;
+            pthread_mutex_unlock(&ssl_handle_mutex);
             return false;
         }
 
@@ -745,6 +1207,7 @@ bool TLSSocketConnection::SSLConnect()
             LOG_ERROR_OUT("Failed to set non-blocking IO mode.");
             SSL_free(_sslHandle);
             _sslHandle = NULL;
+            pthread_mutex_unlock(&ssl_handle_mutex);
             return false;
         }
 
@@ -760,6 +1223,7 @@ bool TLSSocketConnection::SSLConnect()
             SSL_free(_sslHandle);
             _sslHandle = NULL;
             //CloseDescriptor(fd);
+            pthread_mutex_unlock(&ssl_handle_mutex);
             return false;
         }
         else
@@ -806,10 +1270,13 @@ bool TLSSocketConnection::SSLConnect()
             /* We could do all sorts of certificate verification stuff here before
             deallocating the certificate. */
 
+            pthread_mutex_unlock(&ssl_handle_mutex);
             return true;
         }
+
     }
 
+    pthread_mutex_unlock(&ssl_handle_mutex);
     return false;
 }
 

@@ -2,6 +2,7 @@
 #include "logger.h"
 #include "socketconnection_base.h"
 #include <string>
+#include <sstream>
 
 using namespace std;
 
@@ -98,10 +99,17 @@ PacketDataLength Packet::GetDataLength() const
 }
 
 
+string Packet::ToString() const
+{
+    stringstream ss;
+    ss << "Packet - Origin: 0x" << hex << GetOrigin() << dec << "  Type: " << (int)GetType() << "  Length: " << GetDataLength();
+    return ss.str();
+}
+
+
 void Packet::DebugString() const
 {
-    string str;
-    LOG_DEBUG_OUT("Packet - Origin: 0x" << hex << GetOrigin() << dec << "  Type: " << (int)GetType() << "  Length: " << GetDataLength() << "  Bytes: ");
+    LOG_DEBUG_OUT(ToString());
 #ifdef DEBUG
     logger.Hexdump(string(data, GetDataLength()));
 #endif
@@ -111,25 +119,27 @@ void Packet::DebugString() const
 bool Packet::Reply(const char* msg)
 {
     DEBUG_REPORT_LOCATION;
+#if 1
     // disabled
     return false;
-
-    // bool ret_val = false;
-    // if(origin != NULL)
-    // {
-    //  ret_val = origin->Write(msg);
-    // }
-    // return ret_val;
+#else
+     bool ret_val = false;
+     if(origin != NULL)
+     {
+      ret_val = origin->Write(msg);
+     }
+     return ret_val;
+#endif
 }
 
 
-bool Packet::Reply(const PacketType& type_arg, const PacketDataLength& data_length_arg, const char* data)
+bool Packet::Reply(const PacketType& type_arg, const PacketDataLength& data_length_arg, const char* data_arg)
 {
     DEBUG_REPORT_LOCATION;
     bool ret_val = false;
     if(origin != NULL)
     {
-        ret_val = origin->Write(type_arg, data_length_arg, data);
+        ret_val = origin->Write(type_arg, data_length_arg, data_arg);
     }
     return ret_val;
 }

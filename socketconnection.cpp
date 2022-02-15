@@ -66,6 +66,7 @@ void SocketConnection::Deactivate()
         {
             LOG_DEBUG_OUT("cancelling Reader thread.");
             rv = pthread_cancel(reader_id);
+            //send(GetDescriptor(), "", 0, NULL);
             pthread_join(reader_id, NULL);
             LOG_DEBUG_OUT("cancelled Reader thread.");
         }

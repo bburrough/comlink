@@ -34,11 +34,17 @@ private:
 
         Thread responsible for processing both incoming and outgoing data.
     */
-    static void* ReaderWriter(void* void_arg);
+    //static void* ReaderWriter(void* void_arg);
+    static void* Reader(void* void_arg);
+    static void* Writer(void* void_arg);
 
     SSL* GetSSLHandle() const;
 
-    pthread_t reader_writer_id;
+    //pthread_t reader_writer_id;
+    pthread_t reader_id;
+    pthread_t writer_id;
+    pthread_mutex_t ssl_handle_mutex;
+
     SSL* _sslHandle;
     SSL_CTX* _sslContext;
     

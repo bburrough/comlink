@@ -65,7 +65,7 @@ ServerSocket::ServerSocket(const string& ip_address, int port)
 		throw("setsockopt() failed.");
 	}
 
-    err = bind(server_descriptor, (const struct sockaddr*)&server_sock, sizeof(struct sockaddr_in));
+    err = ::bind(server_descriptor, (const struct sockaddr*)&server_sock, sizeof(struct sockaddr_in));
 	if(err)
 	{
         throw("bind() failed.");
@@ -169,44 +169,49 @@ Packet* ServerSocket::NewPacket()
 
 void ServerSocket::DeletePacket(Packet* pkt)
 {
-    SocketConnection_Base* sc = pkt->GetOrigin();
     Delete(pkt);
 }
 
 
-bool ServerSocket::WriteAll(char* cstring_arg)
+bool ServerSocket::WriteAll(const Packet* pkt)
 {
     DEBUG_REPORT_LOCATION;
-    // disabled since SocketConnection removed the ability to write random strings
-    return false;
 
-    // list<SocketConnection*>::iterator sc_itr;
-    // for(sc_itr = connection_set.begin(); sc_itr != connection_set.end(); sc_itr++)
-    // {
-    //  (*sc_itr)->Write(cstring_arg);
-    // }
-    // return true;
+    bool write_success = true;
+    auto visitor = [pkt, &write_success](SocketConnection_Base* connection_ptr) -> bool
+    {
+        write_success = connection_ptr->Write(*pkt); // Write returns a bool that is intended to indicate whether the write succeeded, but there are no circumstances where false is ever returned.        
+        return write_success;
+    };
+
+    connection_set.visit_all(visitor);
+    return write_success;
 }
 
 
-/*
+
+/* 
+    This is essentially a broadcast function. Where, by receiving an incoming packet,
+    the server calls this, that same packet is copied sent out to all connections except
+    the one that originated it.
+*/
 bool ServerSocket::WriteAllExceptOrigin(const Packet* pkt)
 {
     DEBUG_REPORT_LOCATION;
-    list<SocketConnection*>::iterator sc_itr;
-    cout << "Number of socket connections: " << connection_set.size() << endl;
-    for(sc_itr = connection_set.begin(); sc_itr != connection_set.end(); sc_itr++)
-    {
-        if( (*sc_itr) != pkt->GetOrigin() )
-        {
-            cout << "Writing data from " << pkt->GetOrigin() << " to " << (*sc_itr) << endl;
-            (*sc_itr)->Write(pkt->GetType(),pkt->GetDataLength(),pkt->GetData());
-        }
-    }
-    return true;
-}
-*/
 
+    bool write_success = true;
+    auto visitor = [pkt, &write_success](SocketConnection_Base* connection_ptr) -> bool
+    {
+        if (connection_ptr != pkt->GetOrigin())
+        {
+            write_success = connection_ptr->Write(*pkt); // Write returns a bool that is intended to indicate whether the write succeeded, but there are no circumstances where false is ever returned.
+        }
+        return write_success;
+    };
+
+    connection_set.visit_all(visitor);
+    return write_success;
+}
 
 
 void* ServerSocket::AcceptThread(void* void_arg)

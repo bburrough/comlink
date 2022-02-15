@@ -91,9 +91,10 @@ bool SocketConnection_Base::Write(const char* cstring_arg)
 
 bool SocketConnection_Base::Write(const string& string_arg)
 {
+#if 1
     // not allowed
     return false;
-
+#else
     bool ret_val = false;
     string* temp;
     Lock();
@@ -103,6 +104,7 @@ bool SocketConnection_Base::Write(const string& string_arg)
     Unlock();
 
     return ret_val;
+#endif
 }
 
 
