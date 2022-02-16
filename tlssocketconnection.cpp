@@ -59,7 +59,6 @@ void TLSSocketConnection::StaticDeinit()
     _num_outstanding_tls_socket_connections--;
     if (_num_outstanding_tls_socket_connections == 0)
     {
-        ERR_remove_state(0); // TODO: these need to be moved to a static deallocator
         //ENGINE_cleanup();
         //CONF_modules_unload(1);
         ERR_free_strings();
