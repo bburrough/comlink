@@ -1,7 +1,7 @@
 #ifndef _PACKET_H_
 #define _PACKET_H_
 
-#include <stdint.h>
+#include <cstdint>
 #include <stdlib.h>
 #include <string>
 

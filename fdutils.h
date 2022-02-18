@@ -1,7 +1,7 @@
 #ifndef _FD_UTILS_H_
 #define _FD_UTILS_H_
 
-#include <stdint.h>
+#include <cstdint>
 
 #if !(defined(WIN32) || defined(__WIN32) || defined(__WIN32__) || defined(FORCE_WIN32))
 #include <sys/time.h>
